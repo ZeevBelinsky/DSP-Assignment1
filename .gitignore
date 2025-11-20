@@ -1,11 +1,10 @@
-﻿# Build output
+# Maven
 target/
-# Logs
-*.log
-# IDE files
+# Local outputs
+results/
+# IDE
 .idea/
 *.iml
 .vscode/
-# Classes/JARs (if they ever appear outside target)
-*.class
-*.jar
+# OS
+.DS_Store

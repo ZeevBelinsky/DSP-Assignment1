@@ -8,8 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.ArrayList;
-import java.util.HashMap;
 
 public class ManagerApplication {
 
@@ -17,7 +15,7 @@ public class ManagerApplication {
     private static String LM_QUEUE_URL; // Local -> Manager
     private static String MW_QUEUE_URL; // Manager -> Worker
     private static String WM_QUEUE_URL; // Worker -> Manager
-    private static String MA_QUEUE_URL; // Manager -> App  (NEW)
+    private static String MA_QUEUE_URL; // Manager -> App
     private static String S3_BUCKET_NAME;
     private static int N_WORKERS_RATIO;
     private static boolean TERMINATE_MODE;
@@ -49,7 +47,10 @@ public class ManagerApplication {
             MA_QUEUE_URL = args[3];
             S3_BUCKET_NAME = args[4];
             N_WORKERS_RATIO = Integer.parseInt(args[5]);
-            TERMINATE_MODE = Boolean.parseBoolean(args[6]);
+
+            // Accept "true" or "terminate" as enabling terminate mode
+            String termArg = args[6];
+            TERMINATE_MODE = "true".equalsIgnoreCase(termArg) || "terminate".equalsIgnoreCase(termArg);
         } catch (Exception e) {
             System.err.println("Error parsing manager arguments. Aborting. " + e.getMessage());
             return;
@@ -66,7 +67,16 @@ public class ManagerApplication {
             // 1) New jobs from Local -> Manager (use long polling)
             List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 1, 20, 30);
             for (Message message : newTasks) {
-                taskExecutor.submit(() -> handleNewTask(message));
+                taskExecutor.submit(() -> {
+                    try {
+                        handleNewTask(message);
+                    } catch (Exception e) {
+                        System.err.println("[Manager] handleNewTask failed: " + e.getMessage());
+                        e.printStackTrace();
+                        // Note: do NOT delete the message here; it will reappear after visibility timeout.
+                        // If you want to dead-letter bad messages, add logic here.
+                    }
+                });
             }
 
             // 2) Results from Worker -> Manager
@@ -98,13 +108,26 @@ public class ManagerApplication {
 
     // Local -> Manager new job
     private void handleNewTask(Message message) {
-        String body = message.body(); // {"jobId","inputS3","outputFile","terminate"}
-        String jobId = extract(body, "jobId");
-        String inputS3 = extract(body, "inputS3");
-        String outputFile = extract(body, "outputFile");
+        String body = message.body(); // expected: {"jobId","inputS3","outputFile", ...}
+        System.out.println("[Manager] LMQ body: " + body);
+
+        String jobId     = extract(body, "jobId");
+        String inputS3   = extract(body, "inputS3");
+        String outputFile= extract(body, "outputFile");
+
+        // Fallback: build from bucket+key if inputS3 missing
+        if (inputS3 == null || inputS3.isBlank()) {
+            String bucket = extract(body, "bucket");
+            String key    = extract(body, "key");
+            if (!bucket.isBlank() && !key.isBlank()) {
+                inputS3 = "s3://" + bucket + "/" + key;
+                System.out.println("[Manager] Built inputS3 from bucket/key: " + inputS3);
+            }
+        }
 
         if (jobId.isBlank() || inputS3.isBlank()) {
-            System.err.println("Bad job message: " + body);
+            System.err.println("[Manager] Bad job message (missing jobId/inputS3). Body: " + body);
+            // Optional: deleteMessage(LM_QUEUE_URL, message.receiptHandle());
             return;
         }
 
@@ -125,6 +148,7 @@ public class ManagerApplication {
             send(MW_QUEUE_URL, taskJson);
             total++;
         }
+        System.out.println("[Manager] Fanned out " + total + " tasks to MWQ for job " + jobId);
 
         // 2) Track job and init result list
         activeJobs.put(jobId, new ManagerJob(jobId, total, message.receiptHandle(), outputFile));
@@ -170,6 +194,7 @@ public class ManagerApplication {
             // Cleanup
             activeJobs.remove(jobId);
             jobResults.remove(jobId);
+            System.out.println("[Manager] Job " + jobId + " completed. Summary at " + summaryS3);
         }
     }
 
@@ -211,10 +236,9 @@ public class ManagerApplication {
     }
 
     private void terminateSystem() {
-        // TODO (optional nice-to-have):
+        // TODO (optional):
         // - broadcast a shutdown signal on MWQ (if your Worker respects it)
         // - terminate EC2 workers tagged Role=Worker
-        // - then exit (loop already breaks)
     }
 
     private void scaleWorkersIfNeeded() {
