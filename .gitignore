@@ -1,0 +1,11 @@
+﻿# Build output
+target/
+# Logs
+*.log
+# IDE files
+.idea/
+*.iml
+.vscode/
+# Classes/JARs (if they ever appear outside target)
+*.class
+*.jar

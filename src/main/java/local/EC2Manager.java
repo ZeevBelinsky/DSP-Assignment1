@@ -15,10 +15,10 @@ public class EC2Manager {
     private static final String MANAGER_TAG_VALUE = "Manager";
 
     // NOTE: Replace this with your valid AMI ID
-    private static final String AMI_ID = "ami-076515f20540e6e0b";
+    private static final String AMI_ID = "ami-0fa3fe0fa7920f68e";
 
     // NOTE: Replace this with your key pair name (for SSH)
-    private static final String KEY_PAIR_NAME = "wolf-key";
+    private static final String KEY_PAIR_NAME = "vockey";
 
     public EC2Manager() {
         this.ec2 = Ec2Client.builder().region(region).build();
@@ -52,51 +52,44 @@ public class EC2Manager {
         }
     }
 
-    public String startManagerInstance(String jarUrl, String managerArguments) {
+public String startManagerInstance(String jarUrl, String managerArguments) {
 
-        // --- 1. Build the User Data script (Bootstrapping) ---
-        // Downloads the JAR and executes the Manager class
-        String userDataScript = "#!/bin/bash\n"
-                + "wget " + jarUrl + " -O /home/ec2-user/manager.jar\n"
-                + "java -jar /home/ec2-user/manager.jar " + managerArguments + " &\n";
+    // Bootstraps the instance: install Java+AWS CLI, pull jar from S3, run Manager with 7 args
+    String userDataScript =
+            "#!/bin/bash\n" +
+            "yum update -y\n" +
+            "amazon-linux-extras enable corretto17 && yum install -y java-17-amazon-corretto-headless awscli\n" +
+            "aws s3 cp " + jarUrl + " /home/ec2-user/app.jar\n" +
+            "nohup java -cp /home/ec2-user/app.jar manager.ManagerApplication " + managerArguments + " " +
+            "> /var/log/manager.log 2>&1 &\n";
 
-        // User data MUST be Base64 encoded.
-        String userDataBase64 = Base64.getEncoder().encodeToString(userDataScript.getBytes());
+    String userDataBase64 = Base64.getEncoder().encodeToString(userDataScript.getBytes());
 
-        try {
-            // --- 2. Build the RunInstances request ---
-            RunInstancesRequest runRequest = RunInstancesRequest.builder()
-                    .instanceType(InstanceType.T2_MICRO)
-                    .imageId(AMI_ID)
-                    .maxCount(1)
-                    .minCount(1)
-                    .userData(userDataBase64)
-                    .keyName(KEY_PAIR_NAME)
-                    .build();
+    try {
+        RunInstancesRequest runRequest = RunInstancesRequest.builder()
+                .instanceType(InstanceType.T2_MICRO)
+                .imageId(AMI_ID)
+                .maxCount(1).minCount(1)
+                .userData(userDataBase64)
+                .keyName(KEY_PAIR_NAME)
+                // attach an instance profile with S3+SQS permissions
+                .iamInstanceProfile(IamInstanceProfileSpecification.builder()
+                        .name("LabInstanceProfile")
+                        .build())
+                .build();
 
-            // Launch the instance
-            RunInstancesResponse response = ec2.runInstances(runRequest);
-            String instanceId = response.instances().get(0).instanceId();
+        RunInstancesResponse response = ec2.runInstances(runRequest);
+        String instanceId = response.instances().get(0).instanceId();
 
-            // --- 3. Tag the instance as 'Manager' ---
-            Tag managerTag = Tag.builder()
-                    .key(MANAGER_TAG_KEY)
-                    .value(MANAGER_TAG_VALUE)
-                    .build();
+        Tag managerTag = Tag.builder().key(MANAGER_TAG_KEY).value(MANAGER_TAG_VALUE).build();
+        ec2.createTags(CreateTagsRequest.builder().resources(instanceId).tags(managerTag).build());
 
-            CreateTagsRequest tagRequest = CreateTagsRequest.builder()
-                    .resources(instanceId)
-                    .tags(managerTag)
-                    .build();
+        System.out.println("Manager instance started with ID: " + instanceId);
+        return instanceId;
 
-            ec2.createTags(tagRequest);
-
-            System.out.println("Manager instance started with ID: " + instanceId);
-            return instanceId;
-
-        } catch (Exception e) {
-            System.err.println("Error starting Manager instance: " + e.getMessage());
-            return null;
-        }
+    } catch (Exception e) {
+        System.err.println("Error starting Manager instance: " + e.getMessage());
+        return null;
     }
+}
 }

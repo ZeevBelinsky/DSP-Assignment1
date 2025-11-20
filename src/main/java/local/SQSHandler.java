@@ -1,13 +1,10 @@
 package local;
 
+import software.amazon.awssdk.services.sqs.model.*;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
-import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
-import software.amazon.awssdk.services.sqs.model.GetQueueUrlResponse;
-import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
-import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import java.util.Map;
+import java.util.List;
 
 public class SQSHandler {
     private final SqsClient sqs;
@@ -52,4 +49,30 @@ public class SQSHandler {
             return false;
         }
     }
+
+    public List<Message> receive(String queueUrl, int maxMessages, int waitSeconds, int visibilityTimeout) {
+        ReceiveMessageRequest req = ReceiveMessageRequest.builder()
+                .queueUrl(queueUrl)
+                .maxNumberOfMessages(maxMessages)
+                .waitTimeSeconds(waitSeconds) // long polling
+                .visibilityTimeout(visibilityTimeout)
+                .build();
+        return sqs.receiveMessage(req).messages();
+    }
+
+    public void delete(String queueUrl, String receiptHandle) {
+        sqs.deleteMessage(DeleteMessageRequest.builder()
+                .queueUrl(queueUrl)
+                .receiptHandle(receiptHandle)
+                .build());
+    }
+
+    public int getApproximateMessageCount(String queueUrl) {
+        GetQueueAttributesResponse attrs = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
+                .queueUrl(queueUrl)
+                .attributeNames(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
+                .build());
+        return Integer.parseInt(attrs.attributes().get(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES));
+    }
+
 }
