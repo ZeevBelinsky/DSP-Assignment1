@@ -10,9 +10,10 @@ import java.util.Optional;
 
 public class LocalApplication {
 
-    private static final String S3_BUCKET_NAME = "wolfs-amaziah-bucket";
-    // Replace with the actual HTTPS URL where your Manager JAR is hosted (S3/GitHub)
-    private static final String MANAGER_JAR_URL = "s3://wolfs-amaziah-bucket/manager.jar";
+    private static final String S3_BUCKET_NAME = "wolfs-amaziah-bucket-123-aws";
+    // Replace with the actual HTTPS URL where your Manager JAR is hosted
+    // (S3/GitHub)
+    private static final String MANAGER_JAR_URL = "s3://wolfs-amaziah-bucket-123-aws/manager.jar";
 
     public static void main(String[] args) {
 
@@ -31,8 +32,7 @@ public class LocalApplication {
 
         // Manager -> Worker queue with longer visibility timeout
         Map<QueueAttributeName, String> workerQueueAttributes = Map.of(
-                QueueAttributeName.VISIBILITY_TIMEOUT, "600"
-        );
+                QueueAttributeName.VISIBILITY_TIMEOUT, "600");
         String mwQueueUrl = sqsHandler.createQueue("Manager_Worker_Queue", workerQueueAttributes);
 
         // Local -> Manager, Worker -> Manager, Manager -> App (new)
@@ -54,11 +54,10 @@ public class LocalApplication {
                 maQueueUrl,
                 S3_BUCKET_NAME,
                 nString,
-                String.valueOf(terminate)
-        );
+                String.valueOf(terminate));
 
         // Upload input file to S3
-        S3Handler s3Handler = new S3Handler(S3_BUCKET_NAME);
+        S3Handler s3Handler = new S3Handler("wolfs-amaziah-bucket-123-aws"); // TODO: change bucket name
         String s3Key = s3Handler.uploadFile(inputFileName, "input-tasks");
         if (s3Key == null) {
             System.err.println("Failed to upload input file to S3. Aborting.");
@@ -70,8 +69,7 @@ public class LocalApplication {
         String s3InputUrl = "s3://" + S3_BUCKET_NAME + "/" + s3Key;
         String newTaskJson = String.format(
                 "{\"jobId\":\"%s\",\"inputS3\":\"%s\",\"outputFile\":\"%s\",\"terminate\":%s}",
-                jobId, s3InputUrl, outputFileName, terminate
-        );
+                jobId, s3InputUrl, outputFileName, terminate);
 
         // Send the task to LMQ
         boolean sent = sqsHandler.sendMessage(lmQueueUrl, newTaskJson);
@@ -86,7 +84,8 @@ public class LocalApplication {
         Optional<Instance> runningManager = ec2Manager.getRunningManagerInstance();
         if (runningManager.isEmpty()) {
             System.out.println("No manager found. Starting a new instance...");
-            // IMPORTANT: if your user-data uses 'java -jar', pass ONLY the args (no class name).
+            // IMPORTANT: if your user-data uses 'java -jar', pass ONLY the args (no class
+            // name).
             String managerInstanceId = ec2Manager.startManagerInstance(MANAGER_JAR_URL, managerArguments);
             if (managerInstanceId == null) {
                 System.err.println("Failed to start Manager instance. Aborting.");
@@ -97,10 +96,28 @@ public class LocalApplication {
         // === Wait for Manager -> App "done" message, then download summary ===
         while (true) {
             List<Message> msgs = sqsHandler.receive(maQueueUrl, 1, 20, 30);
-            if (msgs.isEmpty()) continue;
+            if (msgs.isEmpty())
+                continue;
 
             Message m = msgs.get(0);
             String body = m.body(); // Expect: {"jobId":"...","summaryHtmlS3":"s3://.../summary.html"}
+            String idMarker = "\"jobId\":\"";
+            int idStart = body.indexOf(idMarker);
+            if (idStart < 0) {
+                System.err.println("Bad message format (no jobId): " + body);
+                sqsHandler.delete(maQueueUrl, m.receiptHandle());
+                continue;
+            }
+
+            int idEnd = body.indexOf('"', idStart + idMarker.length());
+            String msgJobId = body.substring(idStart + idMarker.length(), idEnd);
+
+            // is this message for OUR job?
+            if (!msgJobId.equals(jobId)) {
+                System.out.println("Ignoring message for different Job: " + msgJobId + " (I am: " + jobId + ")");
+                continue;
+            }
+
             String marker = "\"summaryHtmlS3\":\"";
             int i = body.indexOf(marker);
             if (i < 0) {
@@ -115,6 +132,14 @@ public class LocalApplication {
             s3Handler.downloadS3UrlToFile(summaryS3, outputFileName);
             sqsHandler.delete(maQueueUrl, m.receiptHandle());
             System.out.println("Saved summary to " + outputFileName);
+
+            // If terminate flag was set, send terminate signal to Manager
+            if (terminate) {
+                System.out.println("Sending termination signal to Manager...");
+                String termMsg = "{\"action\":\"terminate\", \"terminate\":true}";
+                sqsHandler.sendMessage(lmQueueUrl, termMsg);
+            }
+
             break;
         }
     }

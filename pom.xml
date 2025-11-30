@@ -46,6 +46,14 @@
       <version>3.6.0</version>
     </dependency>
 
+    <!-- TODO: verify if this is needed -->
+    <dependency>
+        <groupId>edu.stanford.nlp</groupId>
+        <artifactId>stanford-parser</artifactId>
+        <version>3.6.0</version>
+        <classifier>models</classifier> 
+    </dependency>
+
     <!-- SLF4J binding so logs actually show (kills the NOP warning) -->
     <!-- Use 1.7.x to match older libs like Stanford 3.6.0 -->
     <dependency>

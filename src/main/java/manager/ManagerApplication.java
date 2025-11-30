@@ -1,13 +1,31 @@
 package manager;
 
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.DescribeInstancesRequest;
+import software.amazon.awssdk.services.ec2.model.InstanceStateName;
+import software.amazon.awssdk.services.ec2.model.InstanceType;
+import software.amazon.awssdk.services.ec2.model.ResourceType;
+import software.amazon.awssdk.services.ec2.model.RunInstancesRequest;
+import software.amazon.awssdk.services.ec2.model.TagSpecification;
+import software.amazon.awssdk.services.ec2.model.TerminateInstancesRequest;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
+import software.amazon.awssdk.services.ec2.model.Filter;
+import software.amazon.awssdk.services.ec2.model.Tag;
+import software.amazon.awssdk.services.ec2.model.IamInstanceProfileSpecification;
+
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ManagerApplication {
 
@@ -22,15 +40,31 @@ public class ManagerApplication {
 
     // ===== state =====
     private final SqsClient sqs;
+    private final Ec2Client ec2;
     private final ConcurrentHashMap<String, ManagerJob> activeJobs;
     private final ConcurrentHashMap<String, List<TaskResult>> jobResults; // per-job aggregation
     private final ExecutorService taskExecutor;
+
+    // Worker JAR URL needs to be defined
+    private static final String WORKER_JAR_URL = "s3://wolfs-amaziah-bucket-123-aws/worker.jar";
+    private static final String WORKER_CLASS_NAME = "worker.WorkerApplication";
+    private static final String INSTANCE_PROFILE_NAME = "LabInstanceProfile";
+    private volatile boolean shouldTerminate = false;
+
+    // ==== tagging Workers ====
+    private static final String WORKER_TAG_KEY = "Role";
+    private static final String WORKER_TAG_VALUE = "Worker";
+    private static final int MAX_TOTAL_INSTANCES = 19;
+
+    private static final String AMI_ID = "ami-0fa3fe0fa7920f68e";
+    private static final String KEY_PAIR_NAME = "assignment1-key";
 
     public ManagerApplication() {
         this.sqs = SqsClient.builder().region(Region.US_EAST_1).build();
         this.activeJobs = new ConcurrentHashMap<>();
         this.jobResults = new ConcurrentHashMap<>();
         this.taskExecutor = Executors.newFixedThreadPool(10);
+        this.ec2 = Ec2Client.builder().region(Region.US_EAST_1).build();
     }
 
     public static void main(String[] args) {
@@ -73,7 +107,8 @@ public class ManagerApplication {
                     } catch (Exception e) {
                         System.err.println("[Manager] handleNewTask failed: " + e.getMessage());
                         e.printStackTrace();
-                        // Note: do NOT delete the message here; it will reappear after visibility timeout.
+                        // Note: do NOT delete the message here; it will reappear after visibility
+                        // timeout.
                         // If you want to dead-letter bad messages, add logic here.
                     }
                 });
@@ -91,14 +126,18 @@ public class ManagerApplication {
             }
 
             // 3) Terminate condition
-            if (TERMINATE_MODE && allJobsCompleted()) {
+            if (shouldTerminate && TERMINATE_MODE && allJobsCompleted()) {
                 System.out.println("All jobs complete and Terminate mode is set. Shutting down...");
                 terminateSystem();
                 break;
             }
 
             // short sleep to reduce SQS churn
-            try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         taskExecutor.shutdown();
@@ -111,14 +150,28 @@ public class ManagerApplication {
         String body = message.body(); // expected: {"jobId","inputS3","outputFile", ...}
         System.out.println("[Manager] LMQ body: " + body);
 
-        String jobId     = extract(body, "jobId");
-        String inputS3   = extract(body, "inputS3");
-        String outputFile= extract(body, "outputFile");
+        // Check for terminate signal
+        if (body.contains("\"terminate\":true") && body.contains("\"action\":\"terminate\"")) {
+            System.out.println("[Manager] Received TERMINATION signal from Local App.");
+            shouldTerminate = true;
+            deleteMessage(LM_QUEUE_URL, message.receiptHandle());
+            return;
+        }
+
+        String jobId = extract(body, "jobId");
+        String inputS3 = extract(body, "inputS3");
+        String outputFile = extract(body, "outputFile");
+
+        if (activeJobs.containsKey(jobId)) {
+            System.out.println("Job " + jobId + " is already active. Skipping duplicate.");
+            deleteMessage(LM_QUEUE_URL, message.receiptHandle());
+            return;
+        }
 
         // Fallback: build from bucket+key if inputS3 missing
         if (inputS3 == null || inputS3.isBlank()) {
             String bucket = extract(body, "bucket");
-            String key    = extract(body, "key");
+            String key = extract(body, "key");
             if (!bucket.isBlank() && !key.isBlank()) {
                 inputS3 = "s3://" + bucket + "/" + key;
                 System.out.println("[Manager] Built inputS3 from bucket/key: " + inputS3);
@@ -136,15 +189,16 @@ public class ManagerApplication {
         int total = 0;
         for (String line : lines) {
             int tab = line.indexOf('\t');
-            if (tab < 0) continue; // skip malformed
+            if (tab < 0)
+                continue; // skip malformed
             String analysis = line.substring(0, tab).trim();
             String url = line.substring(tab + 1).trim();
-            if (analysis.isEmpty() || url.isEmpty()) continue;
+            if (analysis.isEmpty() || url.isEmpty())
+                continue;
 
             String taskJson = String.format(
                     "{\"jobId\":\"%s\",\"url\":\"%s\",\"analysis\":\"%s\"}",
-                    escapeJson(jobId), escapeJson(url), escapeJson(analysis)
-            );
+                    escapeJson(jobId), escapeJson(url), escapeJson(analysis));
             send(MW_QUEUE_URL, taskJson);
             total++;
         }
@@ -168,14 +222,17 @@ public class ManagerApplication {
             return;
         }
 
-        String url  = extract(body, "url");
+        String url = extract(body, "url");
         String anal = extract(body, "analysis");
-        boolean ok  = body.contains("\"ok\":true");
+        boolean ok = body.contains("\"ok\":true");
         String resultS3 = ok ? extract(body, "resultS3") : null;
-        String error    = ok ? null : extract(body, "error");
+        String error = ok ? null : extract(body, "error");
 
         jobResults.get(jobId).add(new TaskResult(url, anal, resultS3, ok, error));
-        if (ok) job.incrementCompleted(); else job.incrementFailed();
+        if (ok)
+            job.incrementCompleted();
+        else
+            job.incrementFailed();
 
         if (job.isCompleted()) {
             // Build and upload summary HTML
@@ -184,8 +241,7 @@ public class ManagerApplication {
             // Notify Local via Manager -> App queue
             String doneJson = String.format(
                     "{\"jobId\":\"%s\",\"summaryHtmlS3\":\"%s\"}",
-                    escapeJson(jobId), escapeJson(summaryS3)
-            );
+                    escapeJson(jobId), escapeJson(summaryS3));
             send(MA_QUEUE_URL, doneJson);
 
             // Delete the original Local message (acknowledge job)
@@ -204,14 +260,15 @@ public class ManagerApplication {
         ReceiveMessageRequest receiveRequest = ReceiveMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .maxNumberOfMessages(maxMessages)
-                .waitTimeSeconds(waitSeconds)      // long polling
+                .waitTimeSeconds(waitSeconds) // long polling
                 .visibilityTimeout(visibilityTimeout)
                 .build();
         return sqs.receiveMessage(receiveRequest).messages();
     }
 
     private void deleteMessage(String queueUrl, String receiptHandle) {
-        if (receiptHandle == null || receiptHandle.isEmpty()) return;
+        if (receiptHandle == null || receiptHandle.isEmpty())
+            return;
         sqs.deleteMessage(DeleteMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .receiptHandle(receiptHandle)
@@ -228,21 +285,42 @@ public class ManagerApplication {
     // ==== JOB/SHUTDOWN ====
 
     private boolean allJobsCompleted() {
-        if (activeJobs.isEmpty()) return true;
+        if (activeJobs.isEmpty())
+            return true;
         for (ManagerJob job : activeJobs.values()) {
-            if (!job.isCompleted()) return false;
+            if (!job.isCompleted())
+                return false;
         }
         return true;
     }
 
     private void terminateSystem() {
-        // TODO (optional):
-        // - broadcast a shutdown signal on MWQ (if your Worker respects it)
-        // - terminate EC2 workers tagged Role=Worker
+        System.out.println("Terminating system via EC2 API...");
+
+        try {
+            List<String> workerIds = getActiveInstanceIds(WORKER_TAG_VALUE);
+            if (!workerIds.isEmpty()) {
+                System.out.println("Terminating " + workerIds.size() + " workers...");
+                ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(workerIds).build());
+            }
+        } catch (Exception e) {
+            System.err.println("Error terminating workers: " + e.getMessage());
+        }
+
+        try {
+            String myId = retrieveInstanceId();
+            if (myId != null) {
+                System.out.println("Terminating self: " + myId);
+                ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(myId).build());
+            }
+        } catch (Exception e) {
+            System.err.println("Error terminating manager: " + e.getMessage());
+        }
     }
 
     private void scaleWorkersIfNeeded() {
-        // Very simple heuristic: approximate backlog -> desired workers = ceil(backlog / N_WORKERS_RATIO)
+        // Very simple heuristic: approximate backlog -> desired workers = ceil(backlog
+        // / N_WORKERS_RATIO)
         try {
             Map<QueueAttributeName, String> attrs = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                     .queueUrl(MW_QUEUE_URL)
@@ -253,14 +331,157 @@ public class ManagerApplication {
             if (attrs.containsKey(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)) {
                 backlog = Integer.parseInt(attrs.get(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES));
             }
-            int desired = Math.max(1, (int)Math.ceil(backlog / (double)Math.max(1, N_WORKERS_RATIO)));
+            int desired = Math.max(1, (int) Math.ceil(backlog / (double) Math.max(1, N_WORKERS_RATIO)));
             ensureWorkers(desired); // implement with EC2; cap at 19 total
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
     }
 
-    private void ensureWorkers(int desired) {
-        // TODO: use EC2 API to count Role=Worker instances; if < desired and total < 19 -> launch more
-        //       attach IAM role, pass MWQ/WMQ/Bucket in user-data, tag Role=Worker
+    private int getActiveInstanceCount(String tagValue) {
+        // Count EC2 instances in RUNNING or PENDING state, optionally filtered by tag
+        try {
+            Filter runningFilter = Filter.builder()
+                    .name("instance-state-name")
+                    .values(InstanceStateName.RUNNING.toString(), InstanceStateName.PENDING.toString()) // Include //
+                                                                                                        // PENDING
+                    .build();
+
+            DescribeInstancesRequest request;
+
+            if (tagValue != null) {
+                Filter tagFilter = Filter.builder()
+                        .name("tag:" + WORKER_TAG_KEY)
+                        .values(tagValue)
+                        .build();
+                request = DescribeInstancesRequest.builder().filters(runningFilter, tagFilter).build();
+            } else {
+                request = DescribeInstancesRequest.builder().filters(runningFilter).build();
+            }
+
+            return (int) ec2.describeInstances(request).reservations().stream()
+                    .flatMap(r -> r.instances().stream())
+                    .count();
+
+        } catch (Exception e) {
+            System.err.println("Error counting active instances: " + e.getMessage());
+            return 0;
+        }
+    }
+
+    private List<String> getActiveInstanceIds(String tagValue) {
+        List<String> ids = new ArrayList<>();
+        try {
+            Filter runningFilter = Filter.builder()
+                    .name("instance-state-name")
+                    .values(InstanceStateName.RUNNING.toString(), InstanceStateName.PENDING.toString())
+                    .build();
+
+            Filter tagFilter = Filter.builder()
+                    .name("tag:" + WORKER_TAG_KEY)
+                    .values(tagValue)
+                    .build();
+
+            DescribeInstancesRequest request = DescribeInstancesRequest.builder()
+                    .filters(runningFilter, tagFilter)
+                    .build();
+
+            ec2.describeInstances(request).reservations().forEach(
+                    reservation -> reservation.instances().forEach(instance -> ids.add(instance.instanceId())));
+        } catch (Exception e) {
+            System.err.println("Error fetching instance IDs: " + e.getMessage());
+        }
+        return ids;
+    }
+
+    private String retrieveInstanceId() {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+
+            HttpRequest tokenReq = HttpRequest.newBuilder()
+                    .uri(URI.create("http://169.254.169.254/latest/api/token"))
+                    .header("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+                    .method("PUT", HttpRequest.BodyPublishers.noBody())
+                    .build();
+
+            String token = client.send(tokenReq, HttpResponse.BodyHandlers.ofString()).body();
+            HttpRequest idReq = HttpRequest.newBuilder()
+                    .uri(URI.create("http://169.254.169.254/latest/meta-data/instance-id"))
+                    .header("X-aws-ec2-metadata-token", token)
+                    .GET()
+                    .build();
+
+            return client.send(idReq, HttpResponse.BodyHandlers.ofString()).body();
+
+        } catch (Exception e) {
+            System.err.println("Failed to retrieve own instance ID via IMDSv2: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void ensureWorkers(int desiredWorkers) {
+        // TODO: use EC2 API to count Role=Worker instances; if < desired and total < 19
+        // -> launch more
+        // attach IAM role, pass MWQ/WMQ/Bucket in user-data, tag Role=Worker
+        int currentWorkers = getActiveInstanceCount(WORKER_TAG_VALUE);
+        int totalInstances = getActiveInstanceCount(null);
+
+        int workersToLaunch = desiredWorkers - currentWorkers;
+
+        if (workersToLaunch <= 0) {
+            return;
+        }
+
+        int availableSlots = MAX_TOTAL_INSTANCES - totalInstances;
+        int actualToLaunch = Math.min(workersToLaunch, availableSlots);
+
+        if (actualToLaunch <= 0) {
+            System.out.println("[EC2] Cannot launch more workers. Reached max limit of " + MAX_TOTAL_INSTANCES);
+            return;
+        }
+
+        System.out.println("[EC2] Launching " + actualToLaunch + " new worker instances.");
+
+        String workerArguments = String.join(" ", MW_QUEUE_URL, WM_QUEUE_URL, S3_BUCKET_NAME);
+
+        String userDataScript = String.join("\n",
+                "#!/bin/bash",
+                "set -euxo pipefail",
+                "exec > /var/log/worker-boot.log 2>&1",
+                "yum update -y",
+                "yum install -y java-17-amazon-corretto-headless awscli jq",
+                "aws configure set default.region us-east-1",
+                (WORKER_JAR_URL.startsWith("s3://")
+                        ? "aws s3 cp \"" + WORKER_JAR_URL + "\" /home/ec2-user/app.jar"
+                        : "curl -L -o /home/ec2-user/app.jar \"" + WORKER_JAR_URL + "\""),
+                "chown ec2-user:ec2-user /home/ec2-user/app.jar",
+                // Run Worker
+                "nohup java -Xmx1500m -cp /home/ec2-user/app.jar " + WORKER_CLASS_NAME + " " + workerArguments
+                        + " > /var/log/worker.log 2>&1 &");
+
+        String userDataBase64 = Base64.getEncoder().encodeToString(userDataScript.getBytes(StandardCharsets.UTF_8));
+
+        try {
+            RunInstancesRequest runRequest = RunInstancesRequest.builder()
+                    .instanceType(InstanceType.T3_SMALL)
+                    .imageId(AMI_ID)
+                    .maxCount(actualToLaunch)
+                    .minCount(actualToLaunch)
+                    .userData(userDataBase64)
+                    // .keyName(KEY_PAIR_NAME)
+                    .iamInstanceProfile(
+                            IamInstanceProfileSpecification.builder().name(INSTANCE_PROFILE_NAME).build()) // מנגנון IAM
+                                                                                                           // Role
+                    .tagSpecifications(TagSpecification.builder()
+                            .resourceType(ResourceType.INSTANCE)
+                            .tags(Tag.builder().key(WORKER_TAG_KEY).value(WORKER_TAG_VALUE).build())
+                            .build())
+                    .build();
+
+            ec2.runInstances(runRequest);
+
+        } catch (Exception e) {
+            System.err.println("Error launching Worker instances: " + e.getMessage());
+        }
     }
 
     // ==== SIMPLE JSON UTILS ====
@@ -268,14 +489,17 @@ public class ManagerApplication {
     private static String extract(String json, String key) {
         String marker = "\"" + key + "\":\"";
         int i = json.indexOf(marker);
-        if (i < 0) return "";
+        if (i < 0)
+            return "";
         int j = json.indexOf('"', i + marker.length());
-        if (j < 0) return "";
+        if (j < 0)
+            return "";
         return json.substring(i + marker.length(), j);
     }
 
     private static String escapeJson(String s) {
-        if (s == null) return "";
+        if (s == null)
+            return "";
         return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
@@ -286,7 +510,7 @@ public class ManagerApplication {
         final String analysis;
         final String resultS3; // null if failed
         final boolean ok;
-        final String error;    // null if ok
+        final String error; // null if ok
 
         TaskResult(String url, String analysis, String resultS3, boolean ok, String error) {
             this.url = url;

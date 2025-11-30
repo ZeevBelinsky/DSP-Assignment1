@@ -19,12 +19,9 @@ public class EC2Manager {
     private static final String MANAGER_TAG_VALUE = "Manager";
 
     // Fallbacks (env vars preferred)
-    private final String amiId =
-            System.getenv().getOrDefault("AMI_ID", "ami-0fa3fe0fa7920f68e");
-    private final String keyName =
-            System.getenv().getOrDefault("KEY_NAME", "vockey");
-    private final String instanceProfileName =
-            System.getenv().getOrDefault("INSTANCE_PROFILE", "LabInstanceProfile");
+    private final String amiId = System.getenv().getOrDefault("AMI_ID", "ami-0fa3fe0fa7920f68e");
+    private final String keyName = System.getenv().getOrDefault("KEY_NAME", "vockey");
+    private final String instanceProfileName = System.getenv().getOrDefault("INSTANCE_PROFILE", "LabInstanceProfile");
 
     public EC2Manager() {
         this.ec2 = Ec2Client.builder().region(region).build();
@@ -61,9 +58,12 @@ public class EC2Manager {
 
     /**
      * Launch the Manager EC2.
-     * @param jarUrl e.g. s3://wolfs-amaziah-bucket/manager.jar  (or a presigned https URL)
+     * 
+     * @param jarUrl           e.g. s3://wolfs-amaziah-bucket-123-aws/manager.jar
+     *                         (or a
+     *                         presigned https URL)
      * @param managerArguments a single string with 7 args, space-separated:
-     *        LMQ MWQ WMQ MAQ bucket nWorkers terminateWhenDone
+     *                         LMQ MWQ WMQ MAQ bucket nWorkers terminateWhenDone
      */
     public String startManagerInstance(String jarUrl, String managerArguments) {
 
@@ -75,12 +75,11 @@ public class EC2Manager {
                 "exec > /var/log/user-data.log 2>&1",
                 "",
                 "yum update -y",
-                "amazon-linux-extras enable corretto17",
-                "yum install -y java-17-amazon-corretto-headless awscli jq curl",
+                // "amazon-linux-extras enable corretto17",
+                "yum install -y java-17-amazon-corretto-headless awscli jq",
                 "",
                 // Set region on-instance (helps awscli if account has no default)
-                "REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region || echo " + region.id() + ")",
-                "aws configure set default.region \"$REGION\"",
+                "aws configure set default.region us-east-1",
                 "",
                 // Fetch the Manager jar (supports s3:// or https presigned URL)
                 (jarUrl.startsWith("s3://")
@@ -91,8 +90,7 @@ public class EC2Manager {
                 // Run Manager
                 "ARGS=\"" + quotedArgs + "\"",
                 "nohup java -cp /home/ec2-user/app.jar manager.ManagerApplication $ARGS > /var/log/manager.log 2>&1 &",
-                ""
-        );
+                "");
 
         String userDataBase64 = Base64.getEncoder().encodeToString(
                 userDataScript.getBytes(StandardCharsets.UTF_8));

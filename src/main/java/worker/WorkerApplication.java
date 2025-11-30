@@ -35,18 +35,19 @@ public class WorkerApplication {
                     ReceiveMessageRequest.builder()
                             .queueUrl(MWQ)
                             .maxNumberOfMessages(1)
-                            .waitTimeSeconds(20)   // long polling
+                            .waitTimeSeconds(20) // long polling
                             .visibilityTimeout(600)
-                            .build()
-            ).messages();
+                            .build())
+                    .messages();
 
-            if (msgs.isEmpty()) continue;
+            if (msgs.isEmpty())
+                continue;
 
             Message m = msgs.get(0);
             String body = m.body(); // {"jobId","url","analysis"}
             String jobId = extract(body, "jobId");
-            String url   = extract(body, "url");
-            String anal  = extract(body, "analysis");
+            String url = extract(body, "url");
+            String anal = extract(body, "analysis");
 
             try {
                 // 1) download URL -> tmp file
@@ -55,21 +56,19 @@ public class WorkerApplication {
 
                 // 2) analyze (stub for now) -> tmp out
                 Path out = Files.createTempFile("out-", ".txt");
-                SimpleAnalysis.run(anal, input, out);
+                ParserHandler.run(anal, input, out);
 
                 // 3) upload to S3
                 String key = "results/" + jobId + "/" + System.currentTimeMillis() + ".txt";
                 s3.putObject(
                         PutObjectRequest.builder().bucket(BUCKET).key(key).build(),
-                        RequestBody.fromFile(out)
-                );
+                        RequestBody.fromFile(out));
                 String resultS3 = "s3://" + BUCKET + "/" + key;
 
                 // 4) report success to WMQ
                 String doneJson = String.format(
                         "{\"jobId\":\"%s\",\"url\":\"%s\",\"analysis\":\"%s\",\"resultS3\":\"%s\",\"ok\":true}",
-                        escape(jobId), escape(url), escape(anal), escape(resultS3)
-                );
+                        escape(jobId), escape(url), escape(anal), escape(resultS3));
                 sqs.sendMessage(SendMessageRequest.builder().queueUrl(WMQ).messageBody(doneJson).build());
 
                 // 5) delete task from MWQ
@@ -81,8 +80,7 @@ public class WorkerApplication {
                 String errorMsg = e.getMessage() == null ? "" : e.getMessage().replace("\"", "'");
                 String failJson = String.format(
                         "{\"jobId\":\"%s\",\"url\":\"%s\",\"analysis\":\"%s\",\"ok\":false,\"error\":\"%s\"}",
-                        escape(jobId), escape(url), escape(anal), escape(errorMsg)
-                );
+                        escape(jobId), escape(url), escape(anal), escape(errorMsg));
                 sqs.sendMessage(SendMessageRequest.builder().queueUrl(WMQ).messageBody(failJson).build());
 
                 sqs.deleteMessage(DeleteMessageRequest.builder()
@@ -93,13 +91,18 @@ public class WorkerApplication {
 
     private static String extract(String json, String key) {
         String marker = "\"" + key + "\":\"";
-        int i = json.indexOf(marker); if (i < 0) return "";
-        int j = json.indexOf('"', i + marker.length()); if (j < 0) return "";
+        int i = json.indexOf(marker);
+        if (i < 0)
+            return "";
+        int j = json.indexOf('"', i + marker.length());
+        if (j < 0)
+            return "";
         return json.substring(i + marker.length(), j);
     }
 
     private static String escape(String s) {
-        if (s == null) return "";
-        return s.replace("\\","\\\\").replace("\"","\\\"");
+        if (s == null)
+            return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }
