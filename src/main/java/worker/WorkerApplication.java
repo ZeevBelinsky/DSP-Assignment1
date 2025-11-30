@@ -36,7 +36,7 @@ public class WorkerApplication {
                             .queueUrl(MWQ)
                             .maxNumberOfMessages(1)
                             .waitTimeSeconds(20) // long polling
-                            .visibilityTimeout(600)
+                            .visibilityTimeout(3600)
                             .build())
                     .messages();
 

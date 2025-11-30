@@ -99,7 +99,7 @@ public class ManagerApplication {
 
         while (true) {
             // 1) New jobs from Local -> Manager (use long polling)
-            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 1, 20, 30);
+            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 1, 20, 3600);
             for (Message message : newTasks) {
                 taskExecutor.submit(() -> {
                     try {
@@ -115,7 +115,7 @@ public class ManagerApplication {
             }
 
             // 2) Results from Worker -> Manager
-            List<Message> results = receiveMessages(WM_QUEUE_URL, 10, 20, 30);
+            List<Message> results = receiveMessages(WM_QUEUE_URL, 10, 20, 3600);
             for (Message result : results) {
                 try {
                     handleWorkerResult(result);
@@ -462,7 +462,7 @@ public class ManagerApplication {
 
         try {
             RunInstancesRequest runRequest = RunInstancesRequest.builder()
-                    .instanceType(InstanceType.T3_SMALL)
+                    .instanceType(InstanceType.T2_SMALL)
                     .imageId(AMI_ID)
                     .maxCount(actualToLaunch)
                     .minCount(actualToLaunch)

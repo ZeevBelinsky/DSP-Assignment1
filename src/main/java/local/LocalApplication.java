@@ -32,7 +32,7 @@ public class LocalApplication {
 
         // Manager -> Worker queue with longer visibility timeout
         Map<QueueAttributeName, String> workerQueueAttributes = Map.of(
-                QueueAttributeName.VISIBILITY_TIMEOUT, "600");
+                QueueAttributeName.VISIBILITY_TIMEOUT, "3600");
         String mwQueueUrl = sqsHandler.createQueue("Manager_Worker_Queue", workerQueueAttributes);
 
         // Local -> Manager, Worker -> Manager, Manager -> App (new)
@@ -95,7 +95,7 @@ public class LocalApplication {
 
         // === Wait for Manager -> App "done" message, then download summary ===
         while (true) {
-            List<Message> msgs = sqsHandler.receive(maQueueUrl, 1, 20, 30);
+            List<Message> msgs = sqsHandler.receive(maQueueUrl, 1, 20, 3600);
             if (msgs.isEmpty())
                 continue;
 
