@@ -9,6 +9,8 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 
 public class S3Handler {
@@ -58,22 +60,38 @@ public class S3Handler {
         return bucketName;
     }
 
-    public void downloadS3UrlToFile(String s3Url, String localPath) {
-        // expects "s3://bucket/key..."
-        if (!s3Url.startsWith("s3://"))
-            throw new IllegalArgumentException("Bad S3 URL: " + s3Url);
-        String without = s3Url.substring("s3://".length());
-        int slash = without.indexOf('/');
-        String b = without.substring(0, slash);
-        String k = without.substring(slash + 1);
-        try {
-            s3.getObject(GetObjectRequest.builder().bucket(b).key(k).build(),
-                    ResponseTransformer.toFile(Paths.get(localPath)));
-            System.out.println("Downloaded " + s3Url + " -> " + localPath);
-        } catch (Exception e) {
-            System.err.println("Error downloading " + s3Url + ": " + e.getMessage());
-            throw e;
-        }
+public void downloadS3UrlToFile(String s3Url, String localPath) {
+    // expects "s3://bucket/key..."
+    if (!s3Url.startsWith("s3://")) {
+        throw new IllegalArgumentException("Bad S3 URL: " + s3Url);
     }
+
+    String without = s3Url.substring("s3://".length());
+    int slash = without.indexOf('/');
+    String b = without.substring(0, slash);
+    String k = without.substring(slash + 1);
+
+    Path target = Paths.get(localPath);
+
+    try {
+        // Make sure the target file does not already exist
+        Files.deleteIfExists(target);
+
+        s3.getObject(
+                GetObjectRequest.builder()
+                        .bucket(b)
+                        .key(k)
+                        .build(),
+                ResponseTransformer.toFile(target)
+        );
+
+        System.out.println("Downloaded " + s3Url + " -> " + localPath);
+    } catch (Exception e) {
+        System.err.println("Error downloading " + s3Url + ": " + e.getMessage());
+        // rethrow as unchecked so we don't need "throws Exception"
+        throw new RuntimeException("Failed downloading " + s3Url + " to " + localPath, e);
+    }
+}
+
 
 }

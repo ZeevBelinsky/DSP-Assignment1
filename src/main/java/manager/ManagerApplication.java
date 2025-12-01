@@ -1,5 +1,7 @@
 package manager;
 
+import common.Config;
+
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeInstancesRequest;
@@ -46,7 +48,7 @@ public class ManagerApplication {
     private final ExecutorService taskExecutor;
 
     // Worker JAR URL needs to be defined
-    private static final String WORKER_JAR_URL = "s3://wolfs-amaziah-bucket-123-aws/worker.jar";
+    private static final String WORKER_JAR_URL = Config.WORKER_JAR_URL;
     private static final String WORKER_CLASS_NAME = "worker.WorkerApplication";
     private static final String INSTANCE_PROFILE_NAME = "LabInstanceProfile";
     private volatile boolean shouldTerminate = false;
@@ -99,7 +101,7 @@ public class ManagerApplication {
 
         while (true) {
             // 1) New jobs from Local -> Manager (use long polling)
-            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 1, 20, 3600);
+            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 10, 20, 3600);
             for (Message message : newTasks) {
                 taskExecutor.submit(() -> {
                     try {
@@ -462,7 +464,7 @@ public class ManagerApplication {
 
         try {
             RunInstancesRequest runRequest = RunInstancesRequest.builder()
-                    .instanceType(InstanceType.T2_SMALL)
+                    .instanceType(InstanceType.T3_MEDIUM)
                     .imageId(AMI_ID)
                     .maxCount(actualToLaunch)
                     .minCount(actualToLaunch)

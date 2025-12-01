@@ -1,5 +1,7 @@
 package local;
 
+import common.Config;
+
 import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 import software.amazon.awssdk.services.sqs.model.Message;
@@ -10,10 +12,10 @@ import java.util.Optional;
 
 public class LocalApplication {
 
-    private static final String S3_BUCKET_NAME = "wolfs-amaziah-bucket-123-aws";
+    private static final String S3_BUCKET_NAME = Config.S3_BUCKET_NAME;
     // Replace with the actual HTTPS URL where your Manager JAR is hosted
     // (S3/GitHub)
-    private static final String MANAGER_JAR_URL = "s3://wolfs-amaziah-bucket-123-aws/manager.jar";
+    private static final String MANAGER_JAR_URL = Config.MANAGER_JAR_URL;
 
     public static void main(String[] args) {
 
@@ -57,7 +59,7 @@ public class LocalApplication {
                 String.valueOf(terminate));
 
         // Upload input file to S3
-        S3Handler s3Handler = new S3Handler("wolfs-amaziah-bucket-123-aws"); // TODO: change bucket name
+        S3Handler s3Handler = new S3Handler(S3_BUCKET_NAME);
         String s3Key = s3Handler.uploadFile(inputFileName, "input-tasks");
         if (s3Key == null) {
             System.err.println("Failed to upload input file to S3. Aborting.");

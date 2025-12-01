@@ -59,9 +59,9 @@ public class EC2Manager {
     /**
      * Launch the Manager EC2.
      * 
-     * @param jarUrl           e.g. s3://wolfs-amaziah-bucket-123-aws/manager.jar
-     *                         (or a
-     *                         presigned https URL)
+     * @param jarUrl           
+     *                         
+     *                         
      * @param managerArguments a single string with 7 args, space-separated:
      *                         LMQ MWQ WMQ MAQ bucket nWorkers terminateWhenDone
      */

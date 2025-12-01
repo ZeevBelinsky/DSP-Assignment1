@@ -46,12 +46,12 @@
       <version>3.6.0</version>
     </dependency>
 
-    <!-- TODO: verify if this is needed -->
+    <!-- Parser models -->
     <dependency>
-        <groupId>edu.stanford.nlp</groupId>
-        <artifactId>stanford-parser</artifactId>
-        <version>3.6.0</version>
-        <classifier>models</classifier> 
+      <groupId>edu.stanford.nlp</groupId>
+      <artifactId>stanford-parser</artifactId>
+      <version>3.6.0</version>
+      <classifier>models</classifier>
     </dependency>
 
     <!-- SLF4J binding so logs actually show (kills the NOP warning) -->
@@ -102,6 +102,16 @@
             </goals>
           </execution>
         </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <configuration>
+          <mainClass>local.JarUploader</mainClass>
+          <classpathScope>runtime</classpathScope>
+        </configuration>
       </plugin>
     </plugins>
   </build>
