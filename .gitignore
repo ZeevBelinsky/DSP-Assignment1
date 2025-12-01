@@ -1,0 +1,10 @@
+# Maven
+target/
+# Local outputs
+results/
+# IDE
+.idea/
+*.iml
+.vscode/
+# OS
+.DS_Store

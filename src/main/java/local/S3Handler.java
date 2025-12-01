@@ -3,10 +3,13 @@ package local;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import java.io.File;
+import java.nio.file.Paths;
 
 public class S3Handler {
     private final S3Client s3;
@@ -53,6 +56,24 @@ public class S3Handler {
 
     public String getBucketName() {
         return bucketName;
+    }
+
+    public void downloadS3UrlToFile(String s3Url, String localPath) {
+        // expects "s3://bucket/key..."
+        if (!s3Url.startsWith("s3://"))
+            throw new IllegalArgumentException("Bad S3 URL: " + s3Url);
+        String without = s3Url.substring("s3://".length());
+        int slash = without.indexOf('/');
+        String b = without.substring(0, slash);
+        String k = without.substring(slash + 1);
+        try {
+            s3.getObject(GetObjectRequest.builder().bucket(b).key(k).build(),
+                    ResponseTransformer.toFile(Paths.get(localPath)));
+            System.out.println("Downloaded " + s3Url + " -> " + localPath);
+        } catch (Exception e) {
+            System.err.println("Error downloading " + s3Url + ": " + e.getMessage());
+            throw e;
+        }
     }
 
 }
