@@ -101,7 +101,7 @@ public class EC2Manager {
                     .imageId(amiId)
                     .maxCount(1).minCount(1)
                     .userData(userDataBase64)
-                    .keyName(keyName)
+                    //.keyName(keyName)
                     .iamInstanceProfile(
                             IamInstanceProfileSpecification.builder()
                                     .name(instanceProfileName)

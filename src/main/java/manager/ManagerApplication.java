@@ -96,124 +96,132 @@ public class ManagerApplication {
         manager.startManagerLoop();
     }
 
-    public void startManagerLoop() {
-        System.out.println("Manager started. Listening to queues...");
+public void startManagerLoop() {
+    System.out.println("Manager started. Listening to queues...");
 
-        while (true) {
-            // 1) New jobs from Local -> Manager (use long polling)
+    while (true) {
+        // 1) New jobs from Local -> Manager (use long polling) - ONLY if not terminating
+        if (!shouldTerminate) {
             List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 10, 20, 3600);
             for (Message message : newTasks) {
-                taskExecutor.submit(() -> {
-                    try {
-                        handleNewTask(message);
-                    } catch (Exception e) {
-                        System.err.println("[Manager] handleNewTask failed: " + e.getMessage());
-                        e.printStackTrace();
-                        // Note: do NOT delete the message here; it will reappear after visibility
-                        // timeout.
-                        // If you want to dead-letter bad messages, add logic here.
-                    }
-                });
-            }
-
-            // 2) Results from Worker -> Manager
-            List<Message> results = receiveMessages(WM_QUEUE_URL, 10, 20, 3600);
-            for (Message result : results) {
                 try {
-                    handleWorkerResult(result);
-                } finally {
-                    // always delete WMQ message after accounting it
-                    deleteMessage(WM_QUEUE_URL, result.receiptHandle());
+                    // process synchronously to avoid races with termination
+                    handleNewTask(message);
+                } catch (Exception e) {
+                    System.err.println("[Manager] handleNewTask failed: " + e.getMessage());
+                    e.printStackTrace();
+                    // Note: do NOT delete the message here; it will reappear after visibility timeout.
                 }
-            }
-
-            // 3) Terminate condition
-            if (shouldTerminate && TERMINATE_MODE && allJobsCompleted()) {
-                System.out.println("All jobs complete and Terminate mode is set. Shutting down...");
-                terminateSystem();
-                break;
-            }
-
-            // short sleep to reduce SQS churn
-            try {
-                Thread.sleep(2000);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
             }
         }
 
-        taskExecutor.shutdown();
+        // 2) Results from Worker -> Manager
+        List<Message> results = receiveMessages(WM_QUEUE_URL, 10, 20, 3600);
+        for (Message result : results) {
+            try {
+                handleWorkerResult(result);
+            } finally {
+                // always delete WMQ message after accounting it
+                deleteMessage(WM_QUEUE_URL, result.receiptHandle());
+            }
+        }
+
+        // 3) Terminate condition
+        if (shouldTerminate && TERMINATE_MODE && allJobsCompleted()) {
+            System.out.println("All jobs complete and Terminate mode is set. Shutting down...");
+            terminateSystem();
+            break;
+        }
+
+        // short sleep to reduce SQS churn
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
     }
 
+    taskExecutor.shutdown();
+}
     // ==== CORE HANDLERS ====
 
     // Local -> Manager new job
-    private void handleNewTask(Message message) {
-        String body = message.body(); // expected: {"jobId","inputS3","outputFile", ...}
-        System.out.println("[Manager] LMQ body: " + body);
+// Local -> Manager new job
+private void handleNewTask(Message message) {
+    String body = message.body(); // expected: {"jobId","inputS3","outputFile", ...}
+    System.out.println("[Manager] LMQ body: " + body);
 
-        // Check for terminate signal
-        if (body.contains("\"terminate\":true") && body.contains("\"action\":\"terminate\"")) {
-            System.out.println("[Manager] Received TERMINATION signal from Local App.");
-            shouldTerminate = true;
-            deleteMessage(LM_QUEUE_URL, message.receiptHandle());
-            return;
-        }
+    boolean isTerminateMessage =
+            body.contains("\"terminate\":true") && body.contains("\"action\":\"terminate\"");
 
-        String jobId = extract(body, "jobId");
-        String inputS3 = extract(body, "inputS3");
-        String outputFile = extract(body, "outputFile");
-
-        if (activeJobs.containsKey(jobId)) {
-            System.out.println("Job " + jobId + " is already active. Skipping duplicate.");
-            deleteMessage(LM_QUEUE_URL, message.receiptHandle());
-            return;
-        }
-
-        // Fallback: build from bucket+key if inputS3 missing
-        if (inputS3 == null || inputS3.isBlank()) {
-            String bucket = extract(body, "bucket");
-            String key = extract(body, "key");
-            if (!bucket.isBlank() && !key.isBlank()) {
-                inputS3 = "s3://" + bucket + "/" + key;
-                System.out.println("[Manager] Built inputS3 from bucket/key: " + inputS3);
-            }
-        }
-
-        if (jobId.isBlank() || inputS3.isBlank()) {
-            System.err.println("[Manager] Bad job message (missing jobId/inputS3). Body: " + body);
-            // Optional: deleteMessage(LM_QUEUE_URL, message.receiptHandle());
-            return;
-        }
-
-        // 1) Read input file (ANALYSIS \t URL per line) and fan-out tasks to MWQ
-        List<String> lines = InputDownloader.readAllLinesFromS3(inputS3);
-        int total = 0;
-        for (String line : lines) {
-            int tab = line.indexOf('\t');
-            if (tab < 0)
-                continue; // skip malformed
-            String analysis = line.substring(0, tab).trim();
-            String url = line.substring(tab + 1).trim();
-            if (analysis.isEmpty() || url.isEmpty())
-                continue;
-
-            String taskJson = String.format(
-                    "{\"jobId\":\"%s\",\"url\":\"%s\",\"analysis\":\"%s\"}",
-                    escapeJson(jobId), escapeJson(url), escapeJson(analysis));
-            send(MW_QUEUE_URL, taskJson);
-            total++;
-        }
-        System.out.println("[Manager] Fanned out " + total + " tasks to MWQ for job " + jobId);
-
-        // 2) Track job and init result list
-        activeJobs.put(jobId, new ManagerJob(jobId, total, message.receiptHandle(), outputFile));
-        jobResults.put(jobId, new CopyOnWriteArrayList<>());
-
-        // 3) Scale workers by N (cap handled in ensureWorkers)
-        scaleWorkersIfNeeded();
+    // If we are already terminating, ignore any *new* non-termination jobs
+    if (shouldTerminate && !isTerminateMessage) {
+        System.out.println("[Manager] Ignoring new job while in termination mode.");
+        // Don't delete the message so another manager (if any) could potentially handle it
+        return;
     }
 
+    // Check for terminate signal
+    if (isTerminateMessage) {
+        System.out.println("[Manager] Received TERMINATION signal from Local App.");
+        shouldTerminate = true;
+        deleteMessage(LM_QUEUE_URL, message.receiptHandle());
+        return;
+    }
+
+    String jobId = extract(body, "jobId");
+    String inputS3 = extract(body, "inputS3");
+    String outputFile = extract(body, "outputFile");
+
+    if (activeJobs.containsKey(jobId)) {
+        System.out.println("Job " + jobId + " is already active. Skipping duplicate.");
+        deleteMessage(LM_QUEUE_URL, message.receiptHandle());
+        return;
+    }
+
+    // Fallback: build from bucket+key if inputS3 missing
+    if (inputS3 == null || inputS3.isBlank()) {
+        String bucket = extract(body, "bucket");
+        String key = extract(body, "key");
+        if (!bucket.isBlank() && !key.isBlank()) {
+            inputS3 = "s3://" + bucket + "/" + key;
+            System.out.println("[Manager] Built inputS3 from bucket/key: " + inputS3);
+        }
+    }
+
+    if (jobId.isBlank() || inputS3.isBlank()) {
+        System.err.println("[Manager] Bad job message (missing jobId/inputS3). Body: " + body);
+        // Optional: deleteMessage(LM_QUEUE_URL, message.receiptHandle());
+        return;
+    }
+
+    // 1) Read input file (ANALYSIS \t URL per line) and fan-out tasks to MWQ
+    List<String> lines = InputDownloader.readAllLinesFromS3(inputS3);
+    int total = 0;
+    for (String line : lines) {
+        int tab = line.indexOf('\t');
+        if (tab < 0)
+            continue; // skip malformed
+        String analysis = line.substring(0, tab).trim();
+        String url = line.substring(tab + 1).trim();
+        if (analysis.isEmpty() || url.isEmpty())
+            continue;
+
+        String taskJson = String.format(
+                "{\"jobId\":\"%s\",\"url\":\"%s\",\"analysis\":\"%s\"}",
+                escapeJson(jobId), escapeJson(url), escapeJson(analysis));
+        send(MW_QUEUE_URL, taskJson);
+        total++;
+    }
+    System.out.println("[Manager] Fanned out " + total + " tasks to MWQ for job " + jobId);
+
+    // 2) Track job and init result list
+    activeJobs.put(jobId, new ManagerJob(jobId, total, message.receiptHandle(), outputFile));
+    jobResults.put(jobId, new CopyOnWriteArrayList<>());
+
+    // 3) Scale workers by N (cap handled in ensureWorkers)
+    scaleWorkersIfNeeded();
+}
     // Worker -> Manager result
     private void handleWorkerResult(Message msg) {
         String body = msg.body(); // {"jobId","url","analysis","resultS3","ok":true/false,"error":...}

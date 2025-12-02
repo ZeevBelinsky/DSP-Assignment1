@@ -97,7 +97,7 @@ public class LocalApplication {
 
         // === Wait for Manager -> App "done" message, then download summary ===
         while (true) {
-            List<Message> msgs = sqsHandler.receive(maQueueUrl, 1, 20, 3600);
+            List<Message> msgs = sqsHandler.receive(maQueueUrl, 1, 20, 10);
             if (msgs.isEmpty())
                 continue;
 
