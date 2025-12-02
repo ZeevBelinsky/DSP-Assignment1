@@ -38,9 +38,6 @@ public class ParserHandler {
 
         for (List<HasWord> sentence : tokenizer) {
 
-            if (sentence.size() > 80)
-                continue;
-
             try {
                 Tree parseTree = parser.apply(sentence);
 

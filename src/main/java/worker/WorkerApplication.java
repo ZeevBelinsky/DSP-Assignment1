@@ -31,13 +31,12 @@ public class WorkerApplication {
         System.out.println("Worker up. MWQ=" + MWQ + " WMQ=" + WMQ + " BUCKET=" + BUCKET);
 
         while (true) {
-            // Receive up to 10 messages at once for better scalability
             List<Message> msgs = sqs.receiveMessage(
                     ReceiveMessageRequest.builder()
                             .queueUrl(MWQ)
-                            .maxNumberOfMessages(10)   // was 1
+                            .maxNumberOfMessages(1)   
                             .waitTimeSeconds(20)       // long polling
-                            .visibilityTimeout(3600)
+                            .visibilityTimeout(7200)
                             .build())
                     .messages();
 

@@ -65,7 +65,7 @@ public class ManagerApplication {
         this.sqs = SqsClient.builder().region(Region.US_EAST_1).build();
         this.activeJobs = new ConcurrentHashMap<>();
         this.jobResults = new ConcurrentHashMap<>();
-        this.taskExecutor = Executors.newFixedThreadPool(10);
+        this.taskExecutor = Executors.newFixedThreadPool(19);
         this.ec2 = Ec2Client.builder().region(Region.US_EAST_1).build();
     }
 
@@ -102,7 +102,7 @@ public void startManagerLoop() {
     while (true) {
         // 1) New jobs from Local -> Manager (use long polling) - ONLY if not terminating
         if (!shouldTerminate) {
-            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 10, 20, 3600);
+            List<Message> newTasks = receiveMessages(LM_QUEUE_URL, 10, 20, 7200);
             for (Message message : newTasks) {
                 try {
                     // process synchronously to avoid races with termination
@@ -116,7 +116,7 @@ public void startManagerLoop() {
         }
 
         // 2) Results from Worker -> Manager
-        List<Message> results = receiveMessages(WM_QUEUE_URL, 10, 20, 3600);
+        List<Message> results = receiveMessages(WM_QUEUE_URL, 1, 20, 7200);
         for (Message result : results) {
             try {
                 handleWorkerResult(result);
@@ -472,7 +472,7 @@ private void handleNewTask(Message message) {
 
         try {
             RunInstancesRequest runRequest = RunInstancesRequest.builder()
-                    .instanceType(InstanceType.T3_MEDIUM)
+                    .instanceType(InstanceType.T3_LARGE)
                     .imageId(AMI_ID)
                     .maxCount(actualToLaunch)
                     .minCount(actualToLaunch)

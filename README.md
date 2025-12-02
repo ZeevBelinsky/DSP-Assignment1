@@ -1,5 +1,13 @@
 # This is a readme for assignment 1 in DSP course
 
+# Assignment 1: Distributed Text Analysis System
+
+### Submitted by:
+* **Name:** Zeev Vladimir Belinsky, **ID:** 213995384
+* **Name:** Noa Herschcovitz, **ID:** 322351305
+
+---
+
 In this assignment we have implemented a parsing system by using an existing standalone parser (Stanford Parser).  
 While the algorithm itself is “just” using the parser, our main core logic is how we orchestrate and scale the parsing in a distributed way.
 
@@ -8,7 +16,24 @@ The goal is to complete many parsing tasks by using AWS services:
 - **S3** for storing input and output files
 - **SQS** for sending tasks and collecting results
 - **EC2** for running a Manager instance and multiple Worker instances
-- A **Local application** that you run on your own machine to coordinate everything
+
+---
+
+## System Architecture
+
+Our system consists of three main components communicating via SQS queues and S3 storage.
+
+### 1. Components
+* **Local Application:** The client-side application. It uploads the input file to S3, starts the Manager (if not running), and waits for the summary HTML.
+* **Manager:** The central controller running on EC2. It downloads the task list, splits it into sub-tasks, scales out Worker nodes, and aggregates the results into a final HTML summary.
+* **Workers:** Transient EC2 nodes that pull tasks from SQS, download the specific text file, run the Stanford Parser (POS/Constituency/Dependency), and upload the result to S3.
+
+### 2. Communication (SQS Queues)
+We used **4 SQS queues** to manage the flow and ensure scalability:
+1.  **Local_Manager_Queue (LMQ):** Incoming jobs from clients to the Manager.
+2.  **Manager_Worker_Queue (MWQ):** Tasks distributed from Manager to Workers.
+3.  **Worker_Manager_Queue (WMQ):** Completed task notifications from Workers to Manager.
+4.  **Manager_App_Queue (MAQ):** Final summary notification from Manager to the specific Local Application.
 
 ---
 
@@ -162,3 +187,45 @@ Step **3** (the combined build + upload step) is only needed if you have **chang
 - If you **did not change the code** and just want to run the system again with the existing JARs:
   - Make sure your AWS details (Step 1) and `S3_BUCKET_NAME` in `Config.java` (Step 2) are correct.
   - You can skip straight to **Step 4**.
+
+---
+
+## Implementation Details & Considerations
+
+### 1. Performance Statistics
+
+* **Input:** 9 text files 
+* **N (Workers Ratio):** 1
+    * **Reason:** We chose `n=1` to aim for maximum parallelism (1 worker per file). However, the actual number of concurrent workers was constrained by the AWS Lab vCPU limit.
+* **Total Processing Time:** ~60 minutes.
+
+### 2. EC2 Instances (AMI & Type)
+* **AMI:** Amazon Linux 2023 (`ami-0fa3fe0fa7920f68e` in `us-east-1`).
+* **Instance Types:**
+    * **Manager:** `t2.micro`. The Manager is mostly I/O bound (communicating with SQS/EC2 API), so a micro instance is sufficient.
+    * **Workers:** `t3.large` (2 vCPUs, 4GB RAM). We selected this instance type because the **Stanford Parser** is highly CPU and memory-intensive. Using smaller instances (like `t2.micro` or `t2.small`) resulted in `OutOfMemoryError` or extremely slow processing times. `t3.large` provided the necessary stability and performance.
+
+### 3. Security
+* **Credentials:** We do not store AWS keys in the code. The Local App uses the local credentials file, and EC2 instances use **IAM Roles** (`LabInstanceProfile`) to access S3/SQS securely.
+
+### 4. Scalability
+* **Dynamic Scaling:** The Manager calculates the required number of workers based on the workload ($Messages / n$) and launches them dynamically.
+* **Limit:** We implemented a hard cap of **19 instances** to comply with AWS Academy limits.
+
+### 5. Persistence & Fault Tolerance
+* **Worker Failure:** We use SQS **Visibility Timeout**. If a Worker crashes or stalls (e.g., due to a heavy file), the message becomes visible again in the queue after a set timeout (1 hour), allowing another worker to pick it up.
+* **Manager Failure / State:** The Manager holds job state (`activeJobs`) in memory. 
+    * **No automatic restart:** A new Manager is only started when a new Local App runs.
+    * **State loss:** If the Manager crashes, partial progress is lost. A restarted Manager will re-fan out all tasks from the original input file stored in S3.
+    * **Duplicate work:** Due to SQS "at-least-once" delivery and potential Manager restarts, some tasks may be executed more than once. The system tolerates this (idempotency) and produces a correct final summary.
+
+### 6. Threads Usage
+* **Manager:** Heavily multi-threaded. It uses a thread for listening to LMQ, another for WMQ, and a thread pool for processing incoming jobs (downloading & splitting files) without blocking the main flow.
+* **Worker:** Single-threaded processing. Since each parsing task fully utilizes the CPU and memory of the `t3.large` instance, running multiple threads on a single Worker would degrade performance. Therefore, we launch more instances rather than more threads per instance.
+
+### 7. Termination Protocol
+We implemented a graceful shutdown mechanism based on a dedicated message.
+* The Local Application sends a JSON termination message to the Manager **only after** it has successfully downloaded the summary:
+  ```json
+  {"action":"terminate", "terminate":true}
+
